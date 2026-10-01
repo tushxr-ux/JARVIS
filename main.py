@@ -440,7 +440,7 @@ class JarvisLive:
     # ── Orb state bridge ────────────────────────────────────────────────────
     def _set_state(self, state: str, amp: float = 0.0) -> None:
         """Set JARVIS state on both the PyQt6 HUD and the Eclipse orb overlay."""
-        self._set_state(state)
+        self.ui.set_state(state)
         orb_server.push(state, amp)
 
     # ── Wake word: state machine ─────────────────────────────────────────────
@@ -1774,6 +1774,8 @@ def main():
     def runner():
         ui.wait_for_api_key()
         jarvis = JarvisLive(ui)
+        import gc
+        gc.collect()
         try:
             asyncio.run(jarvis.run())
         except KeyboardInterrupt:

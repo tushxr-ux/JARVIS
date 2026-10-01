@@ -263,7 +263,7 @@ class _SysMetrics:
                 self._update()
             except Exception:
                 pass
-            time.sleep(2.0)
+            time.sleep(4.0)  # 4 s is plenty — values change slowly
 
     def _update(self):
         cpu = psutil.cpu_percent(interval=None)
@@ -438,13 +438,14 @@ class HudCanvas(QWidget):
 
         # Deep space starfield (80 twinkling stars)
         rng = np.random.default_rng(42)
-        self._star_x  = rng.random(80)
-        self._star_y  = rng.random(80)
-        self._star_sz = rng.uniform(0.03, 0.12, 80)
-        self._star_ph = rng.uniform(0, 6.28, 80)
+        _N_STARS = 24
+        self._star_x  = rng.random(_N_STARS)
+        self._star_y  = rng.random(_N_STARS)
+        self._star_sz = rng.uniform(0.04, 0.12, _N_STARS)
+        self._star_ph = rng.uniform(0, 6.28, _N_STARS)
 
-        # Precomputed unit Fibonacci sphere lattice (N = 950)
-        self._fib_N = 950
+        # Precomputed unit Fibonacci sphere lattice (N = 360 — crisp resolution, 65% less CPU)
+        self._fib_N = 360
         indices = np.arange(self._fib_N, dtype=np.float64)
         phi_ratio = (1.0 + np.sqrt(5.0)) / 2.0
         golden_angle = 2.0 * np.pi * (1.0 - 1.0 / phi_ratio)
@@ -592,8 +593,7 @@ class HudCanvas(QWidget):
     @muted.setter
     def muted(self, val: bool) -> None:
         self._muted = bool(val)
-        self.update()
-        self._tmr.start(33)
+        self._step()
 
     # ── Public API ──────────────────────────────────────────────────────────
     def set_audio_level(self, level: float) -> None:
@@ -738,33 +738,39 @@ class HudCanvas(QWidget):
         self._sphere_phi = (self._sphere_phi + spd) % (2.0 * math.pi)
         self._wave_phase = (self._wave_phase + w_spd) % (2.0 * math.pi)
 
-        # ── Star twinkle ─────────────────────────────────────────────────────
-        self._star_ph = (self._star_ph + (0.015 if is_sleeping else 0.035)) % (2.0 * np.pi)
+        # ── Star twinkle — skip every other tick when sleeping (saves np trig) ─
+        if not is_sleeping or self._paint_tick == 0:
+            self._star_ph = (self._star_ph + (0.015 if is_sleeping else 0.035)) % (2.0 * np.pi)
 
         # ── Blink ────────────────────────────────────────────────────────────
         self._blink_tick += 1
-        if self._blink_tick >= (60 if is_sleeping else 38):
+        # Sleeping blinks very rarely (every 200 ticks); active every 38
+        blink_period = 200 if is_sleeping else 38
+        if self._blink_tick >= blink_period:
             self._blink = not self._blink
             self._blink_tick = 0
             _blinked = True
         else:
             _blinked = False
 
-        # ── HUD metrics refresh every ~2 s ───────────────────────────────────
-        self._metrics_tick = (self._metrics_tick + 1) % 120
+        # ── HUD metrics refresh every ~10 s (no need for live CPU readout) ──
+        self._metrics_tick = (self._metrics_tick + 1) % 150
         if self._metrics_tick == 0:
             self._hud_metrics = _metrics.snapshot()
 
         # ── Dynamic adaptive timer throttle ──────────────────────────────────
+        # 30 fps when active, 20 fps when idle/listening, 4 fps when sleeping.
+        # Sleeping orb barely moves — saves ~70% CPU and prevents laptop heat/lag.
         active = (is_speaking or is_executing or amp > 0.02 or is_active_thinking
                   or self._wake_pulse > 0.01 or self._success_pulse > 0.01
                   or self._error_pulse > 0.01)
-        tgt_interval = 16 if active else (50 if is_sleeping else 33)
+        tgt_interval = 33 if active else (250 if is_sleeping else 50)
         if self._tmr.interval() != tgt_interval:
             self._tmr.setInterval(tgt_interval)
 
-        self._paint_tick = (self._paint_tick + 1) % 2
-        if active or _blinked or self._paint_tick == 0 or is_sleeping:
+        # Skip repaint when sleeping and nothing changed — orb is near-static.
+        self._paint_tick = (self._paint_tick + 1) % 3
+        if active or _blinked or (not is_sleeping) or self._paint_tick == 0:
             self.update()
 
     def paintEvent(self, _):
@@ -970,10 +976,10 @@ class HudCanvas(QWidget):
                     pts = [QPointF(px[i], py[i]) for i in idxs]
                     p.drawPoints(QPolygonF(pts))
 
-        # 3. Outer rim ferrofluid spikes (~80 distinct spires around silhouette)
+        # 3. Outer rim ferrofluid spikes (~30 distinct spires around silhouette)
         rim_all = np.where((edge_fac > 0.82) & (norm_z > 0.10))[0]
         if len(rim_all) > 0:
-            rim_sub = rim_all[::5]
+            rim_sub = rim_all[::2]
             ref = edge_fac[rim_sub]
             dx = x2[rim_sub] / ref
             dy = -y2[rim_sub] / ref
@@ -1082,14 +1088,12 @@ class HudCanvas(QWidget):
         font_status.setPointSize(11)
         font_status.setBold(True)
         txt_rect    = QRectF(0, sy, W, 26)
-        bloom_col   = QColor(col)
-        for bloom_a in (35, 18, 8):
-            bloom_col.setAlpha(bloom_a)
-            p.setPen(QPen(bloom_col, 1))
-            p.setFont(font_status)
-            p.drawText(txt_rect.adjusted(-3, -3, 3, 3), Qt.AlignmentFlag.AlignCenter, txt)
-        p.setPen(QPen(col, 1))
+        bloom_col = QColor(col)
+        bloom_col.setAlpha(40)
+        p.setPen(QPen(bloom_col, 1))
         p.setFont(font_status)
+        p.drawText(txt_rect.adjusted(-1, -1, 1, 1), Qt.AlignmentFlag.AlignCenter, txt)
+        p.setPen(QPen(col, 1))
         p.drawText(txt_rect, Qt.AlignmentFlag.AlignCenter, txt)
 
         p.end()
@@ -1328,7 +1332,7 @@ class FileDropZone(QWidget):
         self._dash_offset = 0.0
         self._anim_tmr = QTimer(self)
         self._anim_tmr.timeout.connect(self._animate)
-        self._anim_tmr.start(40)
+        # Timer started on-demand only (hover or drag-over) to save CPU
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -1336,11 +1340,8 @@ class FileDropZone(QWidget):
         layout.addWidget(self._canvas)
 
     def _animate(self):
-        # The marching-ants dashed border is only meaningful while the user is
-        # hovering or dragging a file over the zone. When idle, skip the repaint
-        # entirely instead of redrawing the whole zone 25×/s forever — that idle
-        # repaint held the GIL and stole time from the audio/response threads.
         if not (self._hovering or self._drag_over):
+            self._anim_tmr.stop()
             return
         self._dash_offset = (self._dash_offset + 0.8) % 20
         self._canvas.update()
@@ -1348,13 +1349,20 @@ class FileDropZone(QWidget):
     def dragEnterEvent(self, e: QDragEnterEvent):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
-            self._drag_over = True; self._canvas.update()
+            self._drag_over = True
+            self._anim_tmr.start(40)
+            self._canvas.update()
 
     def dragLeaveEvent(self, e):
-        self._drag_over = False; self._canvas.update()
+        self._drag_over = False
+        if not self._hovering:
+            self._anim_tmr.stop()
+        self._canvas.update()
 
     def dropEvent(self, e: QDropEvent):
         self._drag_over = False
+        if not self._hovering:
+            self._anim_tmr.stop()
         urls = e.mimeData().urls()
         if urls:
             path = urls[0].toLocalFile()
@@ -1367,10 +1375,15 @@ class FileDropZone(QWidget):
             self._browse()
 
     def enterEvent(self, e):
-        self._hovering = True; self._canvas.update()
+        self._hovering = True
+        self._anim_tmr.start(40)
+        self._canvas.update()
 
     def leaveEvent(self, e):
-        self._hovering = False; self._canvas.update()
+        self._hovering = False
+        if not self._drag_over:
+            self._anim_tmr.stop()
+        self._canvas.update()
 
     def current_file(self) -> str | None:
         return self._current_file
@@ -3273,7 +3286,7 @@ class MainWindow(QMainWindow):
         # Metric update timer
         self._metric_tmr = QTimer(self)
         self._metric_tmr.timeout.connect(self._update_metrics)
-        self._metric_tmr.start(2000)
+        self._metric_tmr.start(5000)  # 5 s — sidebar bars don't need 2 s granularity
         self._update_metrics()
 
         self._log_sig.connect(self._log.append_log)

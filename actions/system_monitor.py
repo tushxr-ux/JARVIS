@@ -23,6 +23,7 @@ _CPU_STREAK = 3
 # ── NVML DLL cache (Windows: nvml.dll, Linux: libnvidia-ml.so.1) ─────────────
 _nvml_lib: object = None
 _nvml_ok:  object = None   # None=untested  True=works  False=unavailable
+_wmi_ok:   object = None   # None=untested  True=works  False=unavailable
 
 
 def _nvml_gpu() -> float:
@@ -97,22 +98,25 @@ def _get_cpu_temp() -> float:
         pass
 
     # Windows: wmi module (pure Python COM, zero subprocess)
-    if _OS == "Windows":
+    global _wmi_ok
+    if _OS == "Windows" and _wmi_ok is not False:
         try:
             import wmi  # type: ignore
             w = wmi.WMI(namespace="root/wmi")
             tz = w.MSAcpi_ThermalZoneTemperature()
             if tz:
+                _wmi_ok = True
                 return (tz[0].CurrentTemperature / 10.0) - 273.15
+            _wmi_ok = False
         except Exception:
-            pass
+            _wmi_ok = False
 
     return -1.0
 
 
 def get_system_status() -> dict:
     """Snapshot of current system metrics for the system_status tool."""
-    cpu  = psutil.cpu_percent(interval=0.2)
+    cpu  = psutil.cpu_percent(interval=None)
     ram  = psutil.virtual_memory()
     temp = _get_cpu_temp()
     gpu  = _get_gpu_usage()
