@@ -1,4 +1,4 @@
-﻿"""
+"""
 orb_server.py — Tiny WebSocket server that bridges JARVIS state to the Eclipse orb.
 Uses only stdlib (asyncio + websockets if available, else falls back to silent no-op).
 Port: 7474
@@ -7,9 +7,10 @@ Protocol: newline-delimited JSON  {"state":"LISTENING","amp":0.42}
 import asyncio
 import json
 import threading
+from typing import Optional
 
 _clients: set = set()
-_loop: asyncio.AbstractEventLoop | None = None
+_loop: Optional[asyncio.AbstractEventLoop] = None
 _available = False
 
 try:

@@ -627,35 +627,6 @@ class HudCanvas(QWidget):
         self._face_cache_sz = -1
 
     # ── Hex grid background (cached pixmap) ─────────────────────────────────
-    def _make_hex_grid(self, W: int, H: int) -> QPixmap:
-        """Pre-render a hex-tile grid into a transparent pixmap."""
-        pm = QPixmap(max(1, W), max(1, H))
-        pm.fill(Qt.GlobalColor.transparent)
-        gp = QPainter(pm)
-        gp.setRenderHint(QPainter.RenderHint.Antialiasing)
-        size = 28  # hex cell size
-        fill_col = QColor(0, 20, 40, 8)
-        edge_col = QColor(0, 180, 255, 14)
-        gp.setPen(QPen(edge_col, 0.7))
-        w3 = size * math.sqrt(3)
-        for row in range(-1, int(H / (size * 1.5)) + 2):
-            for col in range(-1, int(W / w3) + 2):
-                cx = col * w3 + (row % 2) * w3 / 2
-                cy = row * size * 1.5
-                pts = []
-                for i in range(6):
-                    angle = math.radians(60 * i - 30)
-                    pts.append(QPointF(cx + size * math.cos(angle),
-                                       cy + size * math.sin(angle)))
-                path = QPainterPath()
-                path.moveTo(pts[0])
-                for pt in pts[1:]:
-                    path.lineTo(pt)
-                path.closeSubpath()
-                gp.fillPath(path, QBrush(fill_col))
-                gp.drawPath(path)
-        gp.end()
-        return pm
 
     # ── Animation step ──────────────────────────────────────────────────────────
     def _step(self):
