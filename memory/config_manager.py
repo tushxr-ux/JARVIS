@@ -110,15 +110,30 @@ def get_wake_word_enabled() -> bool:
 
 
 def save_wake_word_enabled(enabled: bool) -> None:
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    data["wake_word_enabled"] = bool(enabled)
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _patch_config(wake_word_enabled=bool(enabled))
+
+
+# ── Auto-sleep timeout ────────────────────────────────────────────────────────
+# How long JARVIS stays awake with no user speech before auto-sleeping.
+# Only applies when wake-word mode is enabled.
+# Value is in seconds. -1 means "never auto-sleep".
+# Preset options:  -1 (Never), 300 (5 min), 600 (10 min), 1800 (30 min), 3600 (1 hr)
+# Default changed from 120 s to 600 s (10 minutes) for better UX.
+_SLEEP_TIMEOUT_DEFAULT = 600   # 10 minutes
+
+def get_sleep_timeout() -> float:
+    """Return the auto-sleep timeout in seconds.  -1 means never."""
+    raw = load_api_keys().get("sleep_timeout_secs", _SLEEP_TIMEOUT_DEFAULT)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        v = float(_SLEEP_TIMEOUT_DEFAULT)
+    return v
+
+
+def save_sleep_timeout(seconds: float) -> None:
+    """Persist the auto-sleep timeout.  Pass -1 to disable auto-sleep."""
+    _patch_config(sleep_timeout_secs=float(seconds))
 
 
 def get_brief_enabled() -> bool:

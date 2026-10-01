@@ -48,3 +48,12 @@ desktop.ini
 logs/
 downloads/
 screenshots/
+
+# ── Generated test/debug images (created at runtime, not source) ──────────────
+orb_*.png
+hud_*.png
+test_*.png
+sphere_prototype*.png
+
+# ── CI/code-review config (local only) ────────────────────────────────────────
+.coderabbit.yaml

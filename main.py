@@ -69,7 +69,8 @@ from actions.background_monitor import (
 )
 from actions.web_search        import _news as _fetch_news_sync
 from memory.config_manager     import (
-    get_brief_enabled, get_voice, get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
+    get_brief_enabled, get_voice, get_wake_word_enabled, save_wake_word_enabled,
+    get_input_device, get_output_device, get_sleep_timeout, save_sleep_timeout,
 )
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
@@ -79,10 +80,7 @@ from core.action_loader        import discover_actions
 from core.wake_word            import (
     WakeWordDetector, is_ready as wake_is_ready, install_and_download as wake_install,
 )
-
-# How long the assistant stays awake with no user speech before it auto-sleeps
-# again (wake-word mode only).
-WAKE_SLEEP_TIMEOUT = 120.0   # seconds (2 minutes)
+import orb_server   # Eclipse orb WebSocket bridge (silent no-op if websockets not installed)
 
 def get_base_dir():
     if getattr(sys, "frozen", False):
@@ -352,7 +350,7 @@ def _keep_context_of(exc: BaseException) -> bool:
 class JarvisLive:
     def __init__(self, ui: JarvisUI):
         self.ui             = ui
-        self._asst_name     = "JARVI    S"   # updated each session from config
+        self._asst_name     = "JARVIS"   # updated each session from config
         self.session              = None
         self.audio_in_queue       = None
         self.out_queue            = None
@@ -428,13 +426,22 @@ class JarvisLive:
         self._wake_enabled     = get_wake_word_enabled()
         self._awake            = not self._wake_enabled
         self._wake_detector: WakeWordDetector | None = None
-        self._wake_sleep_timeout = WAKE_SLEEP_TIMEOUT
+        # Auto-sleep timeout in seconds. -1 = never. Read from config; updated when
+        # the user changes the setting in the UI without restarting the session.
+        self._wake_sleep_timeout = get_sleep_timeout()
         # UI control surface for the Wake Word settings section.
         self.ui.wake_is_ready    = wake_is_ready          # () -> bool
         self.ui.wake_get_state   = self._wake_state       # () -> dict
         self.ui.on_wake_toggle   = self._ui_wake_toggle   # (enable: bool) -> str
         self.ui.on_wake_manual   = self._ui_wake_manual   # () -> toggle awake/asleep
         self.ui.on_wake_install  = self._ui_wake_install  # () -> (ok, msg)
+        self.ui.on_sleep_timeout_change = self._ui_set_sleep_timeout  # (seconds: float) -> None
+
+    # ── Orb state bridge ────────────────────────────────────────────────────
+    def _set_state(self, state: str, amp: float = 0.0) -> None:
+        """Set JARVIS state on both the PyQt6 HUD and the Eclipse orb overlay."""
+        self._set_state(state)
+        orb_server.push(state, amp)
 
     # ── Wake word: state machine ─────────────────────────────────────────────
 
@@ -465,7 +472,7 @@ class JarvisLive:
         self._awake = True
         self._last_user_speech = time.monotonic()   # start the auto-sleep clock now
         if not self.ui.muted:
-            self.ui.set_state("LISTENING")
+            self._set_state("WAKING")
         self.ui.write_log(f"SYS: Awake — {reason}.")
 
     def sleep(self, reason: str = "timeout") -> None:
@@ -473,21 +480,35 @@ class JarvisLive:
             return
         self._awake = False
         self.set_speaking(False)
-        self.ui.set_state("SLEEPING")
+        self._set_state("SLEEPING")
         self.ui.write_log(f"SYS: Sleeping — {reason}. Say 'Hey Jarvis' to wake me.")
 
     async def _run_sleep_watch(self) -> None:
-        """Auto-sleep after the configured silence window (wake-word mode only)."""
+        """Auto-sleep after the configured silence window (wake-word mode only).
+
+        Respects the user-configured timeout from config:
+          - timeout > 0: sleep after that many seconds of silence
+          - timeout == -1: never auto-sleep (user must press SLEEP explicitly)
+        The timeout is re-read from self._wake_sleep_timeout each iteration so
+        it takes effect immediately when the user changes it in Settings.
+        """
         while True:
             await asyncio.sleep(5)
             if not self._wake_enabled or not self._awake:
                 continue
+            timeout = self._wake_sleep_timeout
+            if timeout < 0:
+                continue   # "Never" — skip all auto-sleep checks
             with self._speaking_lock:
                 speaking = self._is_speaking
             if speaking:
                 continue
-            if (time.monotonic() - self._last_user_speech) > self._wake_sleep_timeout:
-                self.sleep(reason="no speech for 2 minutes")
+            elapsed = time.monotonic() - self._last_user_speech
+            if elapsed > timeout:
+                mins = int(timeout / 60) if timeout >= 60 else int(timeout)
+                unit = "minute" if timeout >= 60 else "second"
+                plural = "s" if mins != 1 else ""
+                self.sleep(reason=f"no speech for {mins} {unit}{plural}")
 
     # ── Wake word: UI callbacks (called from the Qt thread) ──────────────────
 
@@ -520,6 +541,23 @@ class JarvisLive:
     def _ui_wake_install(self) -> tuple[bool, str]:
         """Download openwakeword + the model (runs in a UI worker thread)."""
         return wake_install(logger=lambda m: self.ui.write_log(f"SYS: {m}"))
+
+    def _ui_set_sleep_timeout(self, seconds: float) -> None:
+        """Update the auto-sleep timeout at runtime from the Settings UI.
+
+        The new value takes effect on the next _run_sleep_watch iteration
+        (every 5 s), so there is no perceptible delay.  It is also persisted
+        to config so it survives a restart.
+        """
+        self._wake_sleep_timeout = seconds
+        save_sleep_timeout(seconds)
+        if seconds < 0:
+            self.ui.write_log("SYS: Auto-sleep disabled (manual sleep only).")
+        else:
+            mins = int(seconds / 60) if seconds >= 60 else int(seconds)
+            unit = "minute" if seconds >= 60 else "second"
+            plural = "s" if mins != 1 else ""
+            self.ui.write_log(f"SYS: Auto-sleep set to {mins} {unit}{plural}.")
 
     def plugin_say(self, instruction: str) -> None:
         """
@@ -629,9 +667,9 @@ class JarvisLive:
         with self._speaking_lock:
             self._is_speaking = value
         if value:
-            self.ui.set_state("SPEAKING")
+            self._set_state("SPEAKING")
         elif not self.ui.muted:
-            self.ui.set_state("LISTENING")
+            self._set_state("LISTENING")
 
     def interrupt(self) -> None:
         """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
@@ -757,7 +795,7 @@ class JarvisLive:
         args = dict(fc.args or {})
 
         print(f"[JARVIS] 🔧 {name}  {args}")
-        self.ui.set_state("THINKING")
+        self._set_state("THINKING")
 
         if name == "save_memory":
             category = args.get("category", "notes")
@@ -767,7 +805,7 @@ class JarvisLive:
                 update_memory({category: {key: {"value": value}}})
                 print(f"[Memory] 💾 save_memory: {category}/{key} = {value}")
             if not self.ui.muted:
-                self.ui.set_state("LISTENING")
+                self._set_state("LISTENING")
             return types.FunctionResponse(
                 id=fc.id, name=name,
                 response={"result": "ok", "silent": True}
@@ -868,6 +906,7 @@ class JarvisLive:
                     args["file_path"] = self.ui.current_file
                 _ctx = {"player": self.ui, "speak": self.speak,
                         "response": None, "session_memory": None}
+                self._set_state("EXECUTING")   # show electric-blue orb during tool run
                 r = await loop.run_in_executor(None, lambda: self._action_registry.run(name, args, _ctx))
                 result = r or "Done."
                 # web_search: mirror results to the on-screen content panel
@@ -895,7 +934,7 @@ class JarvisLive:
             self.speak_error(name, e)
 
         if not self.ui.muted:
-            self.ui.set_state("LISTENING")
+            self._set_state("LISTENING")
 
         print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")
         return types.FunctionResponse(
@@ -1184,8 +1223,9 @@ class JarvisLive:
 
                 # Drive the HUD waveform from JARVIS's own voice while speaking.
                 try:
-                    self.ui.set_audio_level(_pcm_level(
-                        np.frombuffer(bytes(batch), dtype=np.int16)))
+                    _amp = _pcm_level(np.frombuffer(bytes(batch), dtype=np.int16))
+                    self.ui.set_audio_level(_amp)
+                    orb_server.push("SPEAKING", _amp)   # live amplitude to Eclipse orb
                 except Exception:
                     pass
 
@@ -1558,7 +1598,7 @@ class JarvisLive:
         while True:
             try:
                 print("[JARVIS] Connecting...")
-                self.ui.set_state("THINKING")
+                self._set_state("THINKING")
                 _resumed_with = self._resume_handle is not None
                 config = self._build_config()
 
@@ -1599,11 +1639,11 @@ class JarvisLive:
                     if self._wake_enabled:
                         self._ensure_wake_detector()
                         self._awake = False
-                        self.ui.set_state("SLEEPING")
+                        self._set_state("SLEEPING")
                         self.ui.write_log("SYS: JARVIS online — sleeping. Say 'Hey Jarvis' to wake me.")
                     else:
                         self._awake = True
-                        self.ui.set_state("LISTENING")
+                        self._set_state("LISTENING")
                         self.ui.write_log("SYS: JARVIS online.")
 
                     if self._dashboard:
@@ -1689,7 +1729,7 @@ class JarvisLive:
                 # Invalid API key — stop hammering the API, prompt re-configuration
                 if "API key not valid" in err_str or "1007" in err_str:
                     self.ui.write_log("ERR: API key invalid — please re-enter your key.")
-                    self.ui.set_state("SLEEPING")
+                    self._set_state("SLEEPING")
                     self.ui.prompt_reconfig()
                     while not self.ui._win._ready:
                         await asyncio.sleep(1)
@@ -1718,7 +1758,7 @@ class JarvisLive:
                     asyncio.create_task(self._save_session_summary())
 
             self.set_speaking(False)
-            self.ui.set_state("SLEEPING")
+            self._set_state("SLEEPING")
 
             if self._dashboard:
                 await self._dashboard.broadcast({"type": "status", "state": "sleeping"})
@@ -1728,6 +1768,7 @@ class JarvisLive:
             await asyncio.sleep(delay)
 
 def main():
+    orb_server.start()   # start Eclipse orb WebSocket bridge on port 7474
     ui = JarvisUI("face.png")
 
     def runner():
